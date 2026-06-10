@@ -1,0 +1,21 @@
+# Render Blueprint для Unspiral (always-on прокси + прототип + /stats).
+# Render прочитает этот файл при создании сервиса из репозитория.
+services:
+  - type: web
+    name: unspiral
+    runtime: python
+    plan: free
+    buildCommand: ""            # зависимостей нет (только stdlib)
+    startCommand: python server.py
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: PROVIDER           # форсим бесплатный тариф Gemini
+        value: gemini
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: GEMINI_API_KEY     # ⬅ ВПИСАТЬ В ДАШБОРДЕ Render (Environment), НЕ в код
+        sync: false
+      # необязательно: защитить /stats токеном
+      # - key: STATS_TOKEN
+      #   sync: false

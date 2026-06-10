@@ -1,0 +1,929 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Unspiral — funnel prototype</title>
+
+  <!-- Шрифты: serif (Newsreader) для заголовков = тёплый/интимный тон, Inter для тела -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet" />
+
+  <!-- React + Tailwind + Babel через CDN (выбран режим «без Node») -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            serif: ['Newsreader', 'serif'],
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          },
+          colors: {
+            ink: '#0c0a14',
+            ink2: '#15121f',
+            warm: '#f3c79b',   // тёплый свет (выход из спирали)
+            rose: '#e6a6a0',
+            glow: '#ffd9a6',
+          },
+        },
+      },
+    };
+  </script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    html, body { margin: 0; height: 100%; background: #050409; }
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      display: flex; align-items: center; justify-content: center; min-height: 100vh;
+      background:
+        radial-gradient(1200px 600px at 50% -10%, #1c1730 0%, #0a0810 55%, #050409 100%);
+      padding: 18px;
+    }
+    /* iPhone 13 mini: 375 x 812 логических px — жёсткое ограничение «без скролла» */
+    .device {
+      width: 375px; height: 812px; position: relative;
+      border-radius: 46px; padding: 12px;
+      background: linear-gradient(180deg, #2a2438, #15121f);
+      box-shadow: 0 40px 120px rgba(0,0,0,.6), inset 0 0 0 2px rgba(255,255,255,.04);
+    }
+    .screen {
+      position: relative; width: 100%; height: 100%;
+      border-radius: 36px; overflow: hidden;
+      background: linear-gradient(180deg, #0c0a14 0%, #131022 60%, #1a1428 100%);
+      display: flex; flex-direction: column;
+    }
+    .notch {
+      position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+      width: 120px; height: 26px; background: #0c0a14; border-radius: 14px; z-index: 30;
+    }
+    .fadein { animation: fade .45s ease both; }
+    @keyframes fade { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: none } }
+    .breath { animation: breathe 11s ease-in-out infinite; }
+    @keyframes breathe {
+      0%, 100% { transform: scale(.62); opacity: .55 }
+      30%, 60% { transform: scale(1); opacity: 1 }
+    }
+    /* «Дыхание» спирали на welcome */
+    .spin { animation: spin 26s linear infinite; transform-origin: 50% 50%; }
+    @keyframes spin { to { transform: rotate(360deg) } }
+    textarea::placeholder { color: rgba(255,255,255,.35); }
+    .noscroll::-webkit-scrollbar { display: none; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// Живой разбор идёт через локальный прокси (server.py читает ключ из .env).
+// Если открыт как файл (file://) или прокси недоступен — мягкий фолбэк на мок.
+const LIVE = typeof window !== 'undefined' && window.location.protocol.startsWith('http');
+async function fetchReflection(body) {
+  const res = await fetch('/api/reflect', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const j = await res.json();
+  if (!res.ok || j.error || !j.line) throw new Error(j.error || `HTTP ${res.status}`);
+  return { line: j.line, q: j.question, safety: !!j.safety };
+}
+
+// Аналитика воронки: один анонимный id на визит, события шлём на /api/event (best-effort).
+// Считаем: кто дошёл до разбора / paywall / конца, кто дал фидбэк, что хорошо/плохо. Открыть: /stats
+const SID = (typeof window !== 'undefined')
+  ? ('u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)) : 'u0';
+function track(payload) {
+  if (!LIVE) return;
+  try {
+    fetch('/api/event', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, sid: SID, ts: Date.now() }), keepalive: true,
+    }).catch(() => {});
+  } catch (e) { /* аналитика не должна ломать UX */ }
+}
+
+/* ───────────────────────── КОНТЕНТ (язык экранов — EN, словарь аудитории) ───────────────────────── */
+
+// Q3 — темы триггера → выбирают промпт первой сессии и мок-разбор
+const THEMES = {
+  relationships: { label: 'toxic patterns in relationships', short: 'relationship patterns',
+    prompt: `Think of the last time you felt wronged by someone close. What did it remind you of?` },
+  self_sabotage: { label: 'self-sabotage', short: 'self-sabotage',
+    prompt: `Think of something you wanted badly — then quietly undid. What were you protecting yourself from?` },
+  people_pleasing: { label: 'people-pleasing', short: 'people-pleasing',
+    prompt: `Recall the last time you said "yes" when you meant "no." Who were you afraid to disappoint?` },
+  anxiety: { label: 'anxiety & overthinking', short: 'overthinking',
+    prompt: `Think of a thought that looped tonight and wouldn't let go. What is it trying to protect you from?` },
+};
+
+// Узлы для живой Pattern Map (Habit Builder): что можно «залогировать» после сессии.
+// k='t' триггер (тёплый), k='g' glimmer (мягкий свет). Демонстрирует, как карта растёт.
+const MAP_NODES = {
+  relationships: [
+    { k: 't', label: 'Being ignored' }, { k: 't', label: 'Feeling judged' },
+    { k: 't', label: 'Saying yes too fast' }, { k: 'g', label: 'Being truly heard' },
+    { k: 'g', label: 'A real apology' },
+  ],
+  self_sabotage: [
+    { k: 't', label: 'Right before a win' }, { k: 't', label: 'Fear of being seen' },
+    { k: 't', label: 'Procrastinating' }, { k: 'g', label: 'Finishing one thing' },
+    { k: 'g', label: 'Asking for help' },
+  ],
+  people_pleasing: [
+    { k: 't', label: "Can't say no" }, { k: 't', label: 'Over-apologizing' },
+    { k: 't', label: 'Keeping the peace' }, { k: 'g', label: 'A clean boundary' },
+    { k: 'g', label: 'Being chosen anyway' },
+  ],
+  anxiety: [
+    { k: 't', label: 'Late-night loops' }, { k: 't', label: 'Replaying convos' },
+    { k: 't', label: 'Worst-case spirals' }, { k: 'g', label: 'One slow breath' },
+    { k: 'g', label: 'Naming the fear' },
+  ],
+};
+// фиксированные позиции узлов на карте (вокруг центра)
+const NODE_POS = [['22%','22%'],['74%','26%'],['26%','72%'],['70%','68%'],['50%','84%']];
+
+// Мок AI-разбора: тема × тон. l1 = 2 варианта (момент «ага»), l2 = «go deeper».
+// ⚠️ Прототип: живой разбор подключим через LLM API (.env.example) после валидации флоу.
+const REFLECT = {
+  relationships: {
+    gentle: {
+      l1: [
+        { line: `That sounds heavy — and familiar in a way you might not have named yet. The way you describe being wronged, there's an older shape underneath it.`,
+          q: `When was the first time you remember feeling exactly this? What age does this feeling find you at?` },
+        { line: `You're not overreacting. The hurt is loud because it's landing on a wound that was already there.`,
+          q: `Whose voice does that disappointment really sound like — is it only theirs?` },
+      ],
+      l2: { line: `Notice the pattern: you keep ending up across from people who make you earn what should be given freely. That's not bad luck — it's familiar, and familiar can feel like home even when it hurts.`,
+        q: `What would it mean to want someone who doesn't make you prove your worth?` },
+    },
+    direct: {
+      l1: [
+        { line: `You've felt this exact thing before — different face, same ache. Let's not pretend this is the first time.`,
+          q: `Be honest: what part of this did you walk into already knowing how it would end?` },
+        { line: `Calling them toxic is the easy part. The harder one: you keep choosing this. Why does it feel familiar enough to tolerate?`,
+          q: `What do you get to avoid by staying angry at them instead of looking at the pattern?` },
+      ],
+      l2: { line: `Here's the lightbulb: you're not unlucky in love, you're loyal to a pattern. The chaos feels like home because someone taught you love is something you chase, not something you receive.`,
+        q: `Who first taught you that you had to earn love? Name them.` },
+    },
+  },
+  self_sabotage: {
+    gentle: {
+      l1: [
+        { line: `There's a part of you that wanted it badly — and another part that got scared and pulled the plug. Both are trying to protect you.`,
+          q: `What was the quiet fear, right before you let it slip away?` },
+        { line: `You didn't fail. You flinched — at the edge of getting what you wanted. That flinch usually has a long memory.`,
+          q: `If you'd let yourself have it, what would you have had to risk feeling?` },
+      ],
+      l2: { line: `Self-sabotage is rarely about the thing — it's about staying safe from the disappointment of wanting and not getting. If you never fully try, you never fully lose.`,
+        q: `Whose disappointment taught you it was safer not to want too much?` },
+    },
+    direct: {
+      l1: [
+        { line: `You didn't lose it. You handed it back. Own that first — that's where your power is.`,
+          q: `What were you really afraid would happen if you'd actually succeeded?` },
+        { line: `You self-sabotage because failing on your own terms feels safer than being seen trying and falling short. That's control, not weakness — but it's costing you.`,
+          q: `What's the win you're most afraid of, and who would it threaten?` },
+      ],
+      l2: { line: `The lightbulb: you're not afraid of failure, you're afraid of being seen wanting it. So you quit early and call it "not for me." Convenient. Untrue.`,
+        q: `If no one was watching and you couldn't fail — what would you go after?` },
+    },
+  },
+  people_pleasing: {
+    gentle: {
+      l1: [
+        { line: `Saying yes when you meant no isn't weakness — it's an old strategy that once kept you safe. It's just tired now.`,
+          q: `What did you fear would happen to the relationship if you'd said no?` },
+        { line: `You abandoned yourself a little, to keep someone else comfortable. Notice how automatic it was.`,
+          q: `When did you learn that your "no" wasn't safe to say out loud?` },
+      ],
+      l2: { line: `People-pleasing is often a child's bargain: be good, be easy, and you won't be left. The bill comes due later, as resentment you don't feel allowed to feel.`,
+        q: `Whose love felt conditional on you being agreeable?` },
+    },
+    direct: {
+      l1: [
+        { line: `You said yes to keep the peace, and now you're resentful. That peace was never real — it was you disappearing.`,
+          q: `Who taught you that your needs were negotiable and theirs weren't?` },
+        { line: `Be honest: "I don't want to disappoint them" usually means "I'm scared of what they'll do if I'm not useful." Which is it?`,
+          q: `What do you think happens if you let them be disappointed for once?` },
+      ],
+      l2: { line: `The pattern: you confuse being needed with being loved, so you over-give and call it kindness. It's insurance. And it's making you invisible.`,
+        q: `If you stopped being useful tomorrow, who do you fear would leave?` },
+    },
+  },
+  anxiety: {
+    gentle: {
+      l1: [
+        { line: `That looping thought isn't your enemy — it's a frightened part of you trying to keep you safe by rehearsing every danger.`,
+          q: `If that worry could speak plainly, what is it most afraid will happen?` },
+        { line: `Overthinking is what we do when feeling something fully seems too risky. The mind spins so the heart doesn't have to land.`,
+          q: `What feeling are you circling around instead of letting yourself feel?` },
+      ],
+      l2: { line: `Notice the deal you've made: if you worry hard enough, maybe you can control the outcome. But the worry never actually keeps you safe — it just keeps you busy.`,
+        q: `What would you have to trust, to put this down tonight?` },
+    },
+    direct: {
+      l1: [
+        { line: `The looping isn't insight, it's avoidance with good PR. You're not solving it — you're hiding in it.`,
+          q: `What feeling are you avoiding by staying up in your head?` },
+        { line: `You think worrying is being responsible. It's not — it's a way to feel like you're doing something while you do nothing.`,
+          q: `What decision are you not making while you "overthink" it?` },
+      ],
+      l2: { line: `Here's the truth: the anxiety is a control strategy. Analyze every angle and maybe nothing can blindside you. But certainty isn't coming, and the waiting is the suffering.`,
+        q: `What would you do right now if you accepted you can't control how this ends?` },
+    },
+  },
+};
+
+const FLOW = ['welcome','proof','q1','q2','q3','q4','q5','q6',
+  's_intro','s_prompt','s_answer','s_reflection','s_grounding','shadow_map','paywall'];
+const QUIZ = ['q1','q2','q3','q4','q5','q6'];
+
+/* ───────────────────────── UI-примитивы ───────────────────────── */
+
+function Primary({ children, onClick, disabled }) {
+  return (
+    <button onClick={onClick} disabled={disabled}
+      className={`w-full rounded-2xl py-3.5 text-[15px] font-semibold transition
+        ${disabled ? 'bg-white/10 text-white/40'
+          : 'bg-gradient-to-r from-warm to-rose text-ink shadow-lg shadow-rose/20 active:scale-[.98]'}`}>
+      {children}
+    </button>
+  );
+}
+function Ghost({ children, onClick }) {
+  return (
+    <button onClick={onClick}
+      className="w-full rounded-2xl py-3 text-[14px] font-medium text-white/55 hover:text-white/80 transition">
+      {children}
+    </button>
+  );
+}
+function Option({ label, selected, onClick }) {
+  return (
+    <button onClick={onClick}
+      className={`w-full text-left rounded-2xl px-4 py-3.5 text-[14.5px] leading-snug transition border
+        ${selected
+          ? 'bg-warm/15 border-warm/60 text-white'
+          : 'bg-white/[.04] border-white/10 text-white/85 hover:bg-white/[.07]'}`}>
+      {label}
+    </button>
+  );
+}
+function Frame({ children, onBack, progress }) {
+  return (
+    <div className="screen">
+      <div className="notch" />
+      {/* статус-бар / нав: слева — кнопка «назад» (если есть куда), иначе время */}
+      <div className="relative z-30 flex items-center justify-between px-4 pt-2.5 pb-1 text-[11px] text-white/45">
+        {onBack ? (
+          <button onClick={onBack} aria-label="Back"
+            className="-ml-0.5 w-9 h-9 flex items-center justify-center rounded-full text-white/65
+              hover:text-white hover:bg-white/10 active:scale-95 transition">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M15 18l-6-6 6-6" />
+            </svg>
+          </button>
+        ) : (
+          <span className="pl-1.5">9:41</span>
+        )}
+        <span className="font-medium tracking-wide pr-1.5">Unspiral</span>
+      </div>
+      {progress != null && (
+        <div className="px-6 pt-1">
+          <div className="h-1 w-full rounded-full bg-white/10 overflow-hidden">
+            <div className="h-full rounded-full bg-gradient-to-r from-warm to-rose transition-all duration-500"
+              style={{ width: `${(progress / QUIZ.length) * 100}%` }} />
+          </div>
+          <div className="mt-1 text-[10px] text-white/35 text-right">Step {progress} / {QUIZ.length}</div>
+        </div>
+      )}
+      <div className="flex-1 min-h-0 flex flex-col fadein">{children}</div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Приложение ───────────────────────── */
+
+function App() {
+  const [screen, setScreen] = useState('welcome');
+  const [d, setD] = useState({
+    goal: null, blocker: null, segment: null,
+    theme: null, tone: null, reminderSlot: null, reminderTime: null, push: null,
+    answer: '', deeper: false, variant: 0, toneView: null,
+  });
+  const set = (patch) => setD((x) => ({ ...x, ...patch }));
+  const idx = FLOW.indexOf(screen);
+  const go = (s) => setScreen(s);
+  const next = () => setScreen(FLOW[Math.min(idx + 1, FLOW.length - 1)]);
+  const back = () => setScreen(FLOW[Math.max(idx - 1, 0)]);
+  const restart = () => { setD({ goal:null,blocker:null,segment:null,theme:null,tone:null,reminderSlot:null,reminderTime:null,push:null,answer:'',deeper:false,variant:0,toneView:null }); go('welcome'); };
+
+  // аналитика воронки: лог каждого экрана + темы/тона для разреза
+  useEffect(() => { track({ t: 'screen', screen, theme: d.theme, tone: d.tone }); }, [screen]);
+
+  const quizStep = QUIZ.includes(screen) ? QUIZ.indexOf(screen) + 1 : null;
+  const showBack = idx > 0 && !['s_grounding','shadow_map','paywall'].includes(screen);
+
+  const theme = d.theme ? THEMES[d.theme] : null;
+  const tone = d.toneView || d.tone || 'gentle';
+
+  /* —— экраны —— */
+  function body() {
+    switch (screen) {
+
+      /* 1. Welcome — value-first */
+      case 'welcome':
+        return (
+          <div className="flex-1 flex flex-col px-7 pb-7">
+            <div className="flex-1 flex items-center justify-center">
+              <div className="relative w-44 h-44">
+                <svg viewBox="0 0 200 200" className="w-full h-full spin">
+                  <path d="M100,100 m0,0 a4,4 0 1,1 8,4 a14,14 0 1,1 -22,6 a26,26 0 1,1 40,12 a40,40 0 1,1 -60,16 a56,56 0 1,1 86,22"
+                    fill="none" stroke="url(#g)" strokeWidth="2.4" strokeLinecap="round" opacity=".8" />
+                  <defs>
+                    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+                      <stop offset="0" stopColor="#6d5ea8" /><stop offset="1" stopColor="#f3c79b" />
+                    </linearGradient>
+                  </defs>
+                </svg>
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="w-3 h-3 rounded-full bg-glow shadow-[0_0_24px_8px_rgba(255,217,166,.6)]" />
+                </div>
+              </div>
+            </div>
+            <h1 className="font-serif text-[30px] leading-[1.12] text-white">Shadow work<br/>without the spiral.</h1>
+            <p className="mt-3 text-[14.5px] leading-relaxed text-white/60">
+              Most prompts open you up, then leave you alone. Unspiral walks you back out.
+            </p>
+            <div className="mt-5"><Primary onClick={next}>Begin</Primary></div>
+            <p className="mt-3 text-center text-[11px] text-white/35">No account needed · Private on your device</p>
+          </div>
+        );
+
+      /* 2. Proof — снять скепсис (proof честный, без выдумки) */
+      case 'proof':
+        return (
+          <div className="flex-1 flex flex-col px-7 pb-7">
+            <div className="flex-1 flex flex-col justify-center">
+              <h1 className="font-serif text-[27px] leading-tight text-white">You're not doing this alone.</h1>
+              <p className="mt-3 text-[14.5px] leading-relaxed text-white/60">
+                Join the millions already doing shadow work — guided, gently, at your pace.
+              </p>
+              <div className="mt-6 rounded-2xl bg-white/[.04] border border-white/10 p-4">
+                <div className="text-[13px] text-white/80">#shadowwork on TikTok</div>
+                <div className="font-serif text-[26px] text-warm mt-0.5">2.3B+ views</div>
+                <div className="mt-3 text-[11px] text-white/35 border-t border-white/10 pt-3">
+                  ★ rating &amp; reviews — <span className="text-white/50">[REAL — add after launch, never fabricated]</span>
+                </div>
+              </div>
+            </div>
+            <Primary onClick={next}>Next</Primary>
+          </div>
+        );
+
+      /* 3. Q1 — Goal */
+      case 'q1':
+        return (
+          <QuizScreen title="What are you really here for?"
+            options={[
+              ['Stop repeating the same patterns','outcome'],
+              ['Actually finish what I start','habit'],
+              ['Understand myself — safely','trust'],
+            ]}
+            value={d.goal} onPick={(v) => { set({ goal: v }); next(); }} />
+        );
+
+      /* 4. Q2 — What stopped you (сегментация) */
+      case 'q2': {
+        const seg = { circles:'needs_structure', quit:'habit_driven', surface:'needs_depth', spiraled:'needs_safety' };
+        return (
+          <QuizScreen title="What's gotten in the way before?"
+            options={[
+              ['I go in circles, no progress','circles'],
+              ['I quit after a few days','quit'],
+              ['Prompts felt too surface-level','surface'],
+              ['It brought up too much and I spiraled','spiraled'],
+            ]}
+            value={d.blocker} onPick={(v) => { set({ blocker: v, segment: seg[v] }); next(); }} />
+        );
+      }
+
+      /* 5. Q3 — Trigger theme (выбирает промпт первой сессии) */
+      case 'q3':
+        return (
+          <QuizScreen title="What keeps showing up for you?"
+            options={[
+              ['Toxic patterns in relationships','relationships'],
+              ['Self-sabotage','self_sabotage'],
+              ['People-pleasing','people_pleasing'],
+              ['Anxiety / overthinking','anxiety'],
+            ]}
+            value={d.theme} onPick={(v) => { set({ theme: v }); next(); }} />
+        );
+
+      /* 6. Q4 — Guide tone (killer-фича, тон разбора) */
+      case 'q4':
+        return (
+          <QuizScreen title="How should your guide talk to you?"
+            sub="You can switch this anytime."
+            big
+            options={[
+              ['Gentle and soft 🌙','gentle'],
+              ['Direct — no sugarcoating 🔥','direct'],
+            ]}
+            value={d.tone} onPick={(v) => { set({ tone: v }); next(); }} />
+        );
+
+      /* 7. Q5 — When (reminder slot) */
+      case 'q5':
+        return (
+          <QuizScreen title="When should we check in?"
+            big
+            options={[
+              ['Morning ☀️  →  08:00','morning'],
+              ['Night, before bed 🌙  →  21:30','night'],
+            ]}
+            value={d.reminderSlot}
+            onPick={(v) => { set({ reminderSlot: v, reminderTime: v === 'morning' ? '08:00' : '21:30' }); next(); }} />
+        );
+
+      /* 8. Q6 — Pre-permission push (just-in-time) */
+      case 'q6':
+        return (
+          <div className="flex-1 flex flex-col px-7 pb-7">
+            <div className="flex-1 flex flex-col justify-center">
+              <div className="text-4xl mb-4">🔔</div>
+              <h1 className="font-serif text-[25px] leading-tight text-white">Want a gentle nudge so you don't drop off?</h1>
+              <p className="mt-3 text-[14px] leading-relaxed text-white/60">
+                A soft reminder at {d.reminderTime || '21:30'} — so a hard night doesn't turn into a lost week.
+              </p>
+            </div>
+            <div className="space-y-2.5">
+              <Primary onClick={() => { set({ push: true }); next(); }}>Yes, remind me</Primary>
+              <Ghost onClick={() => { set({ push: false }); next(); }}>Maybe later</Ghost>
+            </div>
+          </div>
+        );
+
+      /* 9. S-intro — Safe space (приватность + право остановиться) */
+      case 's_intro':
+        return (
+          <div className="flex-1 flex flex-col px-7 pb-7">
+            <div className="flex-1 flex flex-col justify-center items-center text-center">
+              <div className="w-14 h-14 rounded-full bg-warm/15 border border-warm/40 flex items-center justify-center text-2xl mb-5">🔒</div>
+              <h1 className="font-serif text-[26px] leading-tight text-white">This is yours.<br/>No one else sees it.</h1>
+              <p className="mt-3 text-[14px] leading-relaxed text-white/60 max-w-[260px]">
+                Go at your pace. You can stop anytime — we'll land you softly.
+              </p>
+            </div>
+            <Primary onClick={next}>I'm ready</Primary>
+            <p className="mt-3 text-center text-[11px] text-white/35">Stored on your device · Not therapy — a space to reflect</p>
+          </div>
+        );
+
+      /* 10. S-prompt — промпт по теме (Q3) */
+      case 's_prompt':
+        return (
+          <div className="flex-1 flex flex-col px-7 pb-7">
+            <div className="text-[11px] uppercase tracking-widest text-warm/70 pt-2">Guided session</div>
+            <div className="flex-1 flex items-center justify-center text-center">
+              <h1 className="font-serif text-[24px] leading-[1.3] text-white">{theme?.prompt}</h1>
+            </div>
+            <Primary onClick={next}>Answer</Primary>
+          </div>
+        );
+
+      /* 11. S-answer — свободный ввод (суть продукта) */
+      case 's_answer':
+        return (
+          <div className="flex-1 flex flex-col px-7 pb-7">
+            <p className="font-serif text-[16px] leading-snug text-white/80 pt-3">{theme?.prompt}</p>
+            <textarea
+              value={d.answer} onChange={(e) => set({ answer: e.target.value })} autoFocus
+              placeholder="Let it out. No one's grading this."
+              className="noscroll mt-3 flex-1 w-full resize-none rounded-2xl bg-white/[.04] border border-white/10
+                p-4 text-[14.5px] leading-relaxed text-white/90 outline-none focus:border-warm/50" />
+            <div className="mt-3"><Primary onClick={next} disabled={d.answer.trim().length < 2}>Reflect</Primary></div>
+            <button onClick={() => go('safety')} className="mt-2 text-center text-[11px] text-white/35 hover:text-white/60">
+              I need to pause
+            </button>
+          </div>
+        );
+
+      /* 12. S-reflection — AI-разбор в тоне Q4 ← момент «АГА» (живой LLM + A/B тона) */
+      case 's_reflection':
+        return <ReflectionScreen d={d} set={set} go={go} />;
+
+      /* 13. S-grounding — Landing (анти-спираль) */
+      case 's_grounding':
+        return (
+          <div className="flex-1 flex flex-col px-7 pb-7 items-center text-center">
+            <div className="flex-1 flex flex-col items-center justify-center">
+              <div className="relative w-40 h-40 mb-6 flex items-center justify-center">
+                <div className="absolute w-40 h-40 rounded-full bg-warm/10 breath" />
+                <div className="absolute w-24 h-24 rounded-full bg-warm/20 breath" style={{ animationDelay: '.4s' }} />
+                <div className="w-3 h-3 rounded-full bg-glow shadow-[0_0_30px_10px_rgba(255,217,166,.5)]" />
+              </div>
+              <h1 className="font-serif text-[26px] text-white">Come back up.</h1>
+              <p className="mt-3 text-[14px] leading-relaxed text-white/60 max-w-[260px]">
+                You opened something real. Breathe. You don't have to fix it all tonight.
+              </p>
+            </div>
+            <Primary onClick={() => go('shadow_map')}>See what I uncovered</Primary>
+          </div>
+        );
+
+      /* 14. Shadow Map — ЖИВАЯ карта (Habit Builder): растёт от логирования triggers/glimmers */
+      case 'shadow_map':
+        return <ShadowMapScreen d={d} go={go} />;
+
+      /* 15. Paywall — сразу после Shadow Map (пик мотивации) */
+      case 'paywall': {
+        const [plan, setPlan] = [d._plan || 'annual', (p)=>set({ _plan:p })];
+        return (
+          <div className="flex-1 flex flex-col px-6 pb-6 overflow-y-auto noscroll">
+            <div className="pt-3">
+              <h1 className="font-serif text-[23px] leading-tight text-white">
+                Keep going on {theme?.short} — without the spiral.
+              </h1>
+            </div>
+
+            {/* подтверждение Painkiller + обещание Habit Builder */}
+            <div className="mt-4 space-y-2">
+              <Row icon="💊" t="What you just felt" s="Your session → a real reflection → a soft landing." />
+              <Row icon="🔁" t="Your Pattern Map" s={`Gentle check-ins at ${d.reminderTime || '21:30'}. Catch up missed days, keep your streak.`} />
+            </div>
+
+            {/* trust-timeline (анти-боль обмана) */}
+            <div className="mt-4 rounded-2xl bg-white/[.04] border border-white/10 p-3.5 text-[12px] leading-relaxed text-white/70">
+              <div className="flex justify-between"><span>Today</span><span className="text-white/90">Full access</span></div>
+              <div className="flex justify-between"><span>Day 5</span><span>We'll remind you</span></div>
+              <div className="flex justify-between"><span>Day 7</span><span>$49.99/yr · cancel in 2 taps</span></div>
+            </div>
+
+            {/* планы: annual default + monthly anchor */}
+            <div className="mt-4 space-y-2">
+              <PlanCard id="annual" sel={plan==='annual'} onClick={()=>setPlan('annual')}
+                title="Annual" price="$49.99/yr" sub="≈ $4.17/mo" badge="Best value · save 68%" />
+              <PlanCard id="monthly" sel={plan==='monthly'} onClick={()=>setPlan('monthly')}
+                title="Monthly" price="$12.99/mo" sub="billed monthly" />
+            </div>
+
+            <div className="mt-4">
+              <Primary onClick={() => { track({ t: 'trial_click', plan }); go('feedback'); }}>Start 7-day free trial</Primary>
+              <p className="mt-2 text-center text-[11px] text-white/40">
+                Private &amp; on-device · Cancel anytime · Price shown before you pay
+              </p>
+              <p className="mt-1 text-center text-[10px] text-white/25">
+                ★ testimonials — [REAL, add after user research]
+              </p>
+            </div>
+            <button onClick={() => go('feedback')}
+              className="mt-2 text-center text-[12px] text-white/45 hover:text-white/70">Not now</button>
+          </div>
+        );
+      }
+
+      /* off-flow: safety (мягкий выход при стоп-сигналах) */
+      case 'safety':
+        return (
+          <div className="flex-1 flex flex-col px-7 pb-7 items-center text-center">
+            <div className="flex-1 flex flex-col items-center justify-center">
+              <div className="w-14 h-14 rounded-full bg-warm/15 border border-warm/40 flex items-center justify-center text-2xl mb-5">🫶</div>
+              <h1 className="font-serif text-[24px] leading-tight text-white">Let's pause here.</h1>
+              <p className="mt-3 text-[14px] leading-relaxed text-white/60 max-w-[270px]">
+                You don't have to push through. Take a slow breath. Nothing here is urgent.
+              </p>
+              <p className="mt-4 text-[12.5px] leading-relaxed text-white/45 max-w-[270px]">
+                If things feel like too much to hold alone, you're not alone — in the US you can call or text
+                <span className="text-white/80"> 988</span> anytime. This app is for reflection, not a crisis service.
+              </p>
+            </div>
+            <div className="w-full space-y-2">
+              <Primary onClick={() => go('s_grounding')}>Take a breath</Primary>
+              <Ghost onClick={() => go('s_reflection')}>I'm okay — continue</Ghost>
+            </div>
+          </div>
+        );
+
+      /* off-flow: ненавязчивый сбор фидбэка (в конце опыта) */
+      case 'feedback':
+        return <FeedbackScreen d={d} go={go} />;
+
+      /* финал прототипа — тёплое спасибо */
+      case 'done':
+        return (
+          <div className="flex-1 flex flex-col px-7 pb-7 items-center text-center justify-center">
+            <div className="relative w-20 h-20 mb-5 flex items-center justify-center">
+              <div className="absolute w-20 h-20 rounded-full bg-warm/10 breath" />
+              <div className="w-2.5 h-2.5 rounded-full bg-glow shadow-[0_0_26px_9px_rgba(255,217,166,.5)]" />
+            </div>
+            <h1 className="font-serif text-[24px] text-white">Thank you.</h1>
+            <p className="mt-3 text-[13.5px] text-white/55 max-w-[260px]">
+              This is an early prototype — no real charge. Your time and honesty help shape it.
+            </p>
+            <div className="mt-6 w-full"><Ghost onClick={restart}>↺ Run it again</Ghost></div>
+          </div>
+        );
+
+      default: return null;
+    }
+  }
+
+  return (
+    <div className="device">
+      <Frame onBack={showBack && screen !== 'safety' ? back : null} progress={quizStep}>
+        {body()}
+      </Frame>
+    </div>
+  );
+}
+
+/* квиз-экран (вынесен, чтобы не плодить разметку) */
+function QuizScreen({ title, sub, options, value, onPick, big }) {
+  return (
+    <div className="flex-1 flex flex-col px-7 pb-7">
+      <div className="pt-4">
+        <h1 className="font-serif text-[24px] leading-tight text-white">{title}</h1>
+        {sub && <p className="mt-2 text-[13px] text-white/45">{sub}</p>}
+      </div>
+      <div className={`flex-1 flex flex-col ${big ? 'justify-center gap-3' : 'justify-center gap-2.5'}`}>
+        {options.map(([label, val]) => (
+          <Option key={val} label={label} selected={value === val} onClick={() => onPick(val)} />
+        ))}
+      </div>
+      <p className="text-center text-[11px] text-white/30">Tap to continue</p>
+    </div>
+  );
+}
+
+function Row({ icon, t, s }) {
+  return (
+    <div className="flex gap-3 rounded-2xl bg-white/[.04] border border-white/10 p-3">
+      <div className="text-xl leading-none">{icon}</div>
+      <div>
+        <div className="text-[13px] font-medium text-white">{t}</div>
+        <div className="text-[12px] leading-snug text-white/55 mt-0.5">{s}</div>
+      </div>
+    </div>
+  );
+}
+function PlanCard({ sel, onClick, title, price, sub, badge }) {
+  return (
+    <button onClick={onClick}
+      className={`w-full text-left rounded-2xl px-4 py-3 border transition relative
+        ${sel ? 'bg-warm/15 border-warm/60' : 'bg-white/[.04] border-white/10'}`}>
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-[14px] font-semibold text-white">{title} <span className="text-white/55 font-normal">· {price}</span></div>
+          <div className="text-[11px] text-white/45 mt-0.5">{sub}</div>
+        </div>
+        <div className={`w-5 h-5 rounded-full border-2 ${sel ? 'border-warm bg-warm' : 'border-white/30'}`} />
+      </div>
+      {badge && <div className="mt-1 text-[10px] text-warm">{badge}</div>}
+    </button>
+  );
+}
+
+/* S-reflection — живой LLM-разбор (через локальный прокси) + мок-фолбэк. Момент «АГА». */
+function ReflectionScreen({ d, set, go }) {
+  const theme = d.theme;
+  const tone = d.toneView || d.tone || 'gentle';
+  const [st, setSt] = useState({ loading: true, data: null, mock: false });
+  const lastL1 = useRef(null);   // контекст l1 для уровня «go deeper»
+
+  useEffect(() => {
+    let alive = true;
+    const m = REFLECT[theme][tone];
+    const mock = d.deeper ? m.l2 : m.l1[d.variant % m.l1.length];
+    const useMock = (res) => { if (!alive) return;
+      setSt({ loading: false, data: { line: mock.line, q: mock.q, safety: false }, mock: true });
+      if (!d.deeper) lastL1.current = { line: mock.line, q: mock.q };
+    };
+    if (!LIVE) { useMock(); return; }
+    setSt((s) => ({ ...s, loading: true }));
+    fetchReflection({
+      theme, tone, answer: d.answer, deeper: d.deeper,
+      prevLine: d.deeper && lastL1.current ? lastL1.current.line : '',
+      prevQ: d.deeper && lastL1.current ? lastL1.current.q : '',
+    }).then((r) => {
+      if (!alive) return;
+      setSt({ loading: false, data: r, mock: false });
+      if (!d.deeper) lastL1.current = { line: r.line, q: r.q };
+    }).catch(useMock);   // прокси недоступен / нет ключа → мягкий мок
+    return () => { alive = false; };
+  }, [theme, tone, d.deeper, d.variant]);
+
+  const content = st.data;
+  const safe = !!(content && content.safety);   // стоп-сигнал → не углублять, вести к опоре
+  return (
+    <div className="flex-1 flex flex-col px-6 pb-6">
+      {/* live-переключатель тона для A/B-проверки главного риска */}
+      <div className="flex items-center justify-center gap-1 pt-2">
+        {['gentle','direct'].map((t) => (
+          <button key={t} onClick={() => set({ toneView: t })}
+            className={`px-3 py-1 rounded-full text-[11px] capitalize transition
+              ${tone === t ? 'bg-warm/20 text-warm border border-warm/40' : 'text-white/40 border border-transparent'}`}>
+            {t === 'gentle' ? 'Gentle 🌙' : 'Direct 🔥'}
+          </button>
+        ))}
+      </div>
+      {st.mock && !st.loading && (
+        <div className="text-center text-[10px] text-white/30 mt-1">offline preview · mocked reflection</div>
+      )}
+
+      <div className="flex-1 min-h-0 overflow-y-auto noscroll mt-3">
+        {/* эхо ответа — «оно меня прочитало» */}
+        {d.answer.trim() && (
+          <div className="rounded-xl bg-white/[.03] border border-white/10 px-3.5 py-2.5 mb-4">
+            <div className="text-[10px] uppercase tracking-wider text-white/30 mb-1">You wrote</div>
+            <div className="text-[12.5px] leading-snug text-white/55 italic line-clamp-3">"{d.answer.trim()}"</div>
+          </div>
+        )}
+
+        {st.loading
+          ? (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <div className="w-2.5 h-2.5 rounded-full bg-glow breath shadow-[0_0_22px_8px_rgba(255,217,166,.45)]" />
+              <p className="mt-4 text-[13px] text-white/45">Reading what you wrote…</p>
+            </div>
+          )
+          : (
+            <>
+              <p className="font-serif text-[19px] leading-[1.4] text-white">{content.line}</p>
+              <div className="mt-4 rounded-2xl bg-gradient-to-br from-warm/15 to-rose/10 border border-warm/30 p-4">
+                <div className="text-[10px] uppercase tracking-wider text-warm/70 mb-1.5">
+                  {safe ? "You don't have to hold this alone" : 'One level deeper'}
+                </div>
+                <p className="font-serif text-[16px] leading-snug text-white/95">{content.q}</p>
+              </div>
+              {safe && (
+                <div className="mt-3 rounded-xl bg-white/[.04] border border-white/10 px-3.5 py-2.5 text-[12px] leading-snug text-white/60">
+                  In the US you can call or text <span className="text-white/85">988</span> anytime — and reaching one
+                  trusted person counts. This is a space to reflect, not a crisis service.
+                </div>
+              )}
+              {!d.deeper && !safe && (
+                <button onClick={() => set({ variant: d.variant + 1 })}
+                  className="mt-3 text-[11px] text-white/35 hover:text-white/60">↻ another reflection</button>
+              )}
+            </>
+          )}
+      </div>
+
+      <div className="space-y-2 pt-3">
+        {safe
+          ? <>
+              <Primary onClick={() => go('safety')}>Take a breath</Primary>
+              <Ghost onClick={() => go('s_grounding')}>I'm done for now</Ghost>
+            </>
+          : !d.deeper
+            ? <>
+                <Primary onClick={() => set({ deeper: true })} disabled={st.loading}>Go deeper</Primary>
+                <Ghost onClick={() => go('s_grounding')}>I'm done</Ghost>
+              </>
+            : <Primary onClick={() => go('s_grounding')} disabled={st.loading}>I'm done</Primary>}
+        {!safe && (
+          <button onClick={() => go('safety')} className="w-full text-center text-[11px] text-white/30 hover:text-white/55">
+            I need to pause
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* Shadow Map — ЖИВАЯ карта (Habit Builder): центр = сессия, тапаешь триггер/glimmer → узел зажигается */
+function ShadowMapScreen({ d, go }) {
+  const theme = THEMES[d.theme];
+  const nodes = MAP_NODES[d.theme] || [];
+  const [lit, setLit] = useState([]);   // индексы зажжённых узлов
+  const toggle = (i, node) => {
+    if (lit.includes(i)) return;
+    setLit((x) => [...x, i]);
+    track({ t: 'map_log', kind: node.k === 'g' ? 'glimmer' : 'trigger', label: node.label });
+  };
+  const mapped = lit.length + 1;   // +1 = сегодняшняя сессия
+
+  return (
+    <div className="flex-1 flex flex-col px-6 pb-6">
+      <div className="pt-1">
+        <h1 className="font-serif text-[24px] leading-tight text-white">Your shadow map is forming.</h1>
+        <p className="mt-1.5 text-[13px] leading-relaxed text-white/60">
+          Tonight you touched <span className="text-warm">{theme?.label}</span>. Tap what else shows up —
+          watch the pattern take shape.
+        </p>
+      </div>
+
+      <div className="flex-1 my-3 rounded-2xl bg-black/30 border border-white/10 relative overflow-hidden">
+        {/* связи центр → зажжённые узлы */}
+        <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: 'none' }}>
+          {lit.map((i) => (
+            <line key={i} x1="50%" y1="44%" x2={NODE_POS[i][0]} y2={NODE_POS[i][1]}
+              stroke="#f3c79b" strokeWidth="1" strokeDasharray="3 4" opacity=".4" />
+          ))}
+        </svg>
+        {/* центральный узел = сессия (реальная) */}
+        <div className="absolute" style={{ left: '50%', top: '44%', transform: 'translate(-50%,-50%)' }}>
+          <div className="w-4 h-4 rounded-full bg-glow shadow-[0_0_24px_8px_rgba(255,217,166,.6)] mx-auto" />
+          <div className="text-[10px] text-warm mt-1 w-24 -ml-9 text-center">{theme?.short}</div>
+        </div>
+        {/* узлы triggers/glimmers */}
+        {nodes.map((n, i) => {
+          const on = lit.includes(i);
+          const warm = n.k === 't';
+          return (
+            <div key={i} className="absolute" style={{ left: NODE_POS[i][0], top: NODE_POS[i][1], transform: 'translate(-50%,-50%)' }}>
+              <div className={`rounded-full mx-auto transition-all duration-500 ${on
+                ? (warm ? 'w-3 h-3 bg-rose shadow-[0_0_16px_5px_rgba(230,166,160,.5)]'
+                        : 'w-3 h-3 bg-warm shadow-[0_0_16px_5px_rgba(243,199,155,.5)]')
+                : 'w-2 h-2 bg-white/15'}`} />
+              {on && <div className="text-[9px] text-white/55 mt-0.5 w-20 -ml-7 text-center leading-tight">{n.label}</div>}
+            </div>
+          );
+        })}
+        <div className="absolute top-2 right-3 text-[10px] text-warm/80">{mapped} {mapped === 1 ? 'thread' : 'threads'} mapped</div>
+      </div>
+
+      {/* чипы для логирования — это и есть «рост карты» */}
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {nodes.map((n, i) => !lit.includes(i) && (
+          <button key={i} onClick={() => toggle(i, n)}
+            className={`px-2.5 py-1 rounded-full text-[11px] border transition active:scale-95
+              ${n.k === 't' ? 'border-rose/40 text-rose/90 hover:bg-rose/10' : 'border-warm/40 text-warm/90 hover:bg-warm/10'}`}>
+            {n.k === 't' ? '⚡ ' : '✦ '}{n.label}
+          </button>
+        ))}
+      </div>
+
+      <Primary onClick={() => go('paywall')}>{lit.length ? 'Unlock my full map' : 'Unlock my map'}</Primary>
+      <p className="mt-1.5 text-center text-[10px] text-white/30">⚡ triggers · ✦ glimmers — your map grows every day</p>
+    </div>
+  );
+}
+
+/* Ненавязчивый сбор фидбэка в конце — питает /stats (что хорошо/плохо, какой тон) */
+function FeedbackScreen({ d, go }) {
+  const [got, setGot] = useState(null);     // yes / kinda / no
+  const [tone, setTone] = useState(d.tone); // какой тон сильнее
+  const [text, setText] = useState('');
+
+  const submit = () => {
+    track({ t: 'feedback', got, tone_pref: tone, text: text.trim().slice(0, 300), theme: d.theme, chosen_tone: d.tone });
+    go('done');
+  };
+
+  return (
+    <div className="flex-1 flex flex-col px-7 pb-7">
+      <div className="pt-3">
+        <h1 className="font-serif text-[22px] leading-tight text-white">One quick thing 🙏</h1>
+        <p className="mt-1.5 text-[13px] text-white/55">20 seconds, fully optional — it helps us make this real.</p>
+      </div>
+
+      <div className="flex-1 flex flex-col justify-center gap-5">
+        <div>
+          <div className="text-[13px] text-white/75 mb-2">Did the reflection feel like it actually got you?</div>
+          <div className="flex gap-2">
+            {[['yes','👍 Yes'],['kinda','😐 Kind of'],['no','👎 Not really']].map(([v,l]) => (
+              <button key={v} onClick={() => setGot(v)}
+                className={`flex-1 rounded-xl py-2.5 text-[12.5px] border transition ${got === v
+                  ? 'bg-warm/15 border-warm/60 text-white' : 'bg-white/[.04] border-white/10 text-white/75'}`}>{l}</button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="text-[13px] text-white/75 mb-2">Which voice hit harder?</div>
+          <div className="flex gap-2">
+            {[['gentle','Gentle 🌙'],['direct','Direct 🔥']].map(([v,l]) => (
+              <button key={v} onClick={() => setTone(v)}
+                className={`flex-1 rounded-xl py-2.5 text-[12.5px] border transition ${tone === v
+                  ? 'bg-warm/15 border-warm/60 text-white' : 'bg-white/[.04] border-white/10 text-white/75'}`}>{l}</button>
+            ))}
+          </div>
+        </div>
+        <input value={text} onChange={(e) => setText(e.target.value)} maxLength={300}
+          placeholder="Anything you'd change? (optional)"
+          className="w-full rounded-xl bg-white/[.04] border border-white/10 px-3.5 py-3 text-[13px]
+            text-white/90 outline-none focus:border-warm/50" />
+      </div>
+
+      <div className="space-y-2">
+        <Primary onClick={submit} disabled={!got && !text.trim()}>Send</Primary>
+        <Ghost onClick={() => { track({ t: 'feedback_skip' }); go('done'); }}>Skip</Ghost>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
