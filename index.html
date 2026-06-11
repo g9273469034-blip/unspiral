@@ -97,12 +97,24 @@ async function fetchReflection(body) {
 // Считаем: кто дошёл до разбора / paywall / конца, кто дал фидбэк, что хорошо/плохо. Открыть: /stats
 const SID = (typeof window !== 'undefined')
   ? ('u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)) : 'u0';
+// Гипотеза спринта из ссылки (?h=spiral|map|honest) → по ней /stats разводит, какой крючок гонит трафик до «ага».
+// Принимаем и ?utm_campaign, и алиасы имён гипотез из launch-sprint-plan.md (h1_spiraling и т.п.). Цепляем ко ВСЕМ событиям.
+const HYP = (() => {
+  try {
+    const p = new URLSearchParams(window.location.search);
+    let h = (p.get('h') || p.get('utm_campaign') || '').toLowerCase();
+    const alias = { h1_spiraling: 'spiral', h2_no_reflection: 'map', h3_persona: 'honest',
+                    h1: 'spiral', h2: 'map', h3: 'honest' };
+    h = (alias[h] || h).replace(/[^a-z0-9_]/g, '').slice(0, 16);
+    return h || null;
+  } catch (e) { return null; }
+})();
 function track(payload) {
   if (!LIVE) return;
   try {
     fetch('/api/event', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...payload, sid: SID, ts: Date.now() }), keepalive: true,
+      body: JSON.stringify({ ...payload, sid: SID, ts: Date.now(), ...(HYP ? { h: HYP } : {}) }), keepalive: true,
     }).catch(() => {});
   } catch (e) { /* аналитика не должна ломать UX */ }
 }

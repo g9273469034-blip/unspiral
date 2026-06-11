@@ -244,7 +244,7 @@ EVENTS_FILE = os.path.join(HERE, "events.jsonl")
 STATS_TOKEN = os.environ.get("STATS_TOKEN", "").strip()   # если задан — /stats?token=... обязателен
 _evlock = threading.Lock()
 _ALLOWED_EVENT_KEYS = {"t", "sid", "ts", "screen", "theme", "tone", "kind", "label",
-                       "plan", "got", "tone_pref", "text", "chosen_tone"}
+                       "plan", "got", "tone_pref", "text", "chosen_tone", "h"}
 
 
 def append_event(ip, payload):
@@ -269,6 +269,7 @@ def compute_stats():
         return {"events": 0}
     seen_screen = {}     # sid -> set(screens)
     sids = set()
+    sid_hyp = {}         # sid -> гипотеза спринта (spiral/map/honest), из ?h= в ссылке
     trial = set()
     go_deeper, tone_switch, fb_skip = set(), 0, 0
     got = {"yes": 0, "kinda": 0, "no": 0}
@@ -284,6 +285,9 @@ def compute_stats():
         total += 1
         sid = e.get("sid", "?")
         sids.add(sid)
+        h = e.get("h")
+        if h and sid not in sid_hyp:
+            sid_hyp[sid] = h
         t = e.get("t")
         if t == "screen":
             seen_screen.setdefault(sid, set()).add(e.get("screen"))
@@ -308,8 +312,21 @@ def compute_stats():
         return sum(1 for s in seen_screen.values() if sc in s)
 
     visits = len(sids)
+
+    # Разрез воронки по гипотезам спринта (какой крючок гонит трафик до «ага»). Считаем фиксированные 3 + «без метки».
+    by_hyp = {}
+    for hyp in ("spiral", "map", "honest", "bio", "(none)"):
+        members = [sid for sid in sids if sid_hyp.get(sid, "(none)") == hyp]
+        by_hyp[hyp] = {
+            "visits": len(members),
+            "reflection": sum(1 for sid in members if "s_reflection" in seen_screen.get(sid, set())),
+            "paywall": sum(1 for sid in members if "paywall" in seen_screen.get(sid, set())),
+            "trial": sum(1 for sid in members if sid in trial),
+            "done": sum(1 for sid in members if "done" in seen_screen.get(sid, set())),
+        }
+
     return {
-        "events": total, "visits": visits,
+        "events": total, "visits": visits, "by_hyp": by_hyp,
         "reached_session": reached("s_answer"),
         "reached_reflection": reached("s_reflection"),
         "reached_paywall": reached("paywall"),
@@ -348,6 +365,33 @@ def render_stats_html(s):
         bar("Дошли до фидбэка", s["reached_feedback"]),
         bar("Завершили (до конца)", s["completed"]),
     ])
+    # Разрез по гипотезам: рендерим только фиксированные крючки + «без метки», если по нему был трафик.
+    bh = s.get("by_hyp", {})
+    HYP_LABELS = {"spiral": "🌀 SPIRAL (h1 «иду по кругу»)", "map": "🗺️ MAP (h2 «бросили без ответа»)",
+                  "honest": "🔥 HONEST (h3 выбор тона)", "bio": "🔗 BIO (профиль)",
+                  "(none)": "— без метки (прямой заход)"}
+
+    def hyp_row(key):
+        d = bh.get(key) or {}
+        vis = d.get("visits", 0)
+        if key in ("bio", "(none)") and vis == 0:
+            return ""
+        refl = d.get("reflection", 0)
+        aha = f"{round(100 * refl / vis)}%" if vis else "—"
+        cells = "".join(f"<td style='padding:6px 12px;text-align:right'>{x}</td>"
+                        for x in (vis, f"{refl} <span style='color:#f3c79b'>{aha}</span>",
+                                  d.get("paywall", 0), d.get("trial", 0), d.get("done", 0)))
+        return f"<tr><td style='padding:6px 12px'>{HYP_LABELS[key]}</td>{cells}</tr>"
+
+    hyp_rows = "".join(hyp_row(k) for k in ("spiral", "map", "honest", "bio", "(none)"))
+    hyp_head = ("<tr style='color:#888'>" + "".join(
+        f"<td style='padding:6px 12px{'' if i == 0 else ';text-align:right'}'>{h}</td>"
+        for i, h in enumerate(("Гипотеза", "Визиты", "→ Разбор (ага)", "→ Paywall", "→ Trial", "→ Конец"))) + "</tr>")
+    hyp_table = ("<h3 style='margin-top:26px'>По гипотезам — крючок → «ага» <span style='font-size:12px;color:#888'>"
+                 "(метка из ?h= в ссылке)</span></h3>"
+                 "<table style='border-collapse:collapse;width:100%;background:#15121f;border-radius:10px;font-size:14px'>"
+                 f"{hyp_head}{hyp_rows}</table>")
+
     g = s["got"]
     tp = s["tone_pref"]
     comments = "".join(
@@ -360,6 +404,7 @@ def render_stats_html(s):
 <body style='font-family:system-ui;background:#0c0a14;color:#eee;padding:28px;max-width:680px;margin:auto'>
 <h2 style='font-weight:600'>Unspiral — воронка теста <span style='font-size:12px;color:#888'>(автообновление 20с)</span></h2>
 <table style='border-collapse:collapse;width:100%;background:#15121f;border-radius:10px'>{funnel}</table>
+{hyp_table}
 <h3 style='margin-top:26px'>Разбор «попал»?</h3>
 <p>👍 Yes: <b>{g['yes']}</b> &nbsp; 😐 Kind of: <b>{g['kinda']}</b> &nbsp; 👎 Not really: <b>{g['no']}</b></p>
 <h3>Какой тон сильнее (A/B)</h3>
